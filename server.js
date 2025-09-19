@@ -28,8 +28,11 @@ const corsOptions = {
         'http://localhost:3000',
         'https://localhost:3000',
         'https://wa-backend-ochre.vercel.app',
-        'https://*.vercel.app'
-    ],
+        'https://*.vercel.app',
+        'https://*.railway.app',
+        process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null,
+        process.env.RAILWAY_STATIC_URL || null
+    ].filter(Boolean),
     credentials: true,
     optionsSuccessStatus: 200,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
