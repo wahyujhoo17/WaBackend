@@ -1,4 +1,17 @@
 require('dotenv').config();
+console.log('Server starting...');
+
+// Check for required environment variables
+const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+
+if (missingEnvVars.length > 0) {
+    console.error('❌ Missing required environment variables:', missingEnvVars);
+    process.exit(1);
+}
+
+console.log('✅ Environment variables loaded');
+
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
@@ -22,6 +35,28 @@ const supabase = createClient(
         }
     }
 );
+
+// Test database connection on startup
+async function testDatabaseConnection() {
+    try {
+        console.log('🔍 Testing database connection...');
+        const { data, error } = await supabase
+            .from('users')
+            .select('count')
+            .limit(1);
+
+        if (error) {
+            console.error('❌ Database connection failed:', error.message);
+            return false;
+        }
+
+        console.log('✅ Database connection successful');
+        return true;
+    } catch (err) {
+        console.error('❌ Database connection error:', err.message);
+        return false;
+    }
+}
 
 // Store WhatsApp clients per user
 const whatsappClients = new Map();
@@ -562,7 +597,61 @@ app.get('/admin/health', async (req, res) => {
     }
 });
 
+// Root endpoint
+app.get('/', (req, res) => {
+    res.json({
+        status: 'ok',
+        message: 'WhatsApp API Backend is running',
+        version: '1.0.0',
+        endpoints: {
+            'GET /': 'API status',
+            'GET /health-check': 'Health check',
+            'GET /admin/qr/:userId': 'Generate QR for user (admin)',
+            'GET /my-qr': 'Generate QR for authenticated user',
+            'GET /admin/test-db': 'Test database connection'
+        }
+    });
+});
+
+// Health check endpoint
+app.get('/health-check', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        version: '1.0.0'
+    });
+});
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-    // Server started successfully
+
+// Start server with database connection test
+async function startServer() {
+    const dbConnected = await testDatabaseConnection();
+
+    if (!dbConnected) {
+        console.error('❌ Failed to connect to database. Server will not start.');
+        process.exit(1);
+    }
+
+    app.listen(PORT, () => {
+        console.log(`🚀 WhatsApp API Backend is running on port ${PORT}`);
+        console.log(`📱 API endpoints available at http://localhost:${PORT}`);
+        console.log('✅ Server started successfully');
+        console.log('\n📋 Available endpoints:');
+        console.log(`   GET  http://localhost:${PORT}/`);
+        console.log(`   GET  http://localhost:${PORT}/health-check`);
+        console.log(`   GET  http://localhost:${PORT}/admin/qr/:userId`);
+        console.log(`   GET  http://localhost:${PORT}/my-qr`);
+        console.log(`   GET  http://localhost:${PORT}/admin/test-db`);
+        console.log(`   GET  http://localhost:${PORT}/admin/users`);
+        console.log(`   POST http://localhost:${PORT}/admin/generate-api-key`);
+        console.log(`   POST http://localhost:${PORT}/send-message`);
+    });
+}
+
+startServer().catch(err => {
+    console.error('❌ Failed to start server:', err);
+    process.exit(1);
 });
