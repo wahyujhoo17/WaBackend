@@ -28,6 +28,7 @@ const corsOptions = {
         'http://localhost:3000',
         'https://localhost:3000',
         'https://wa-backend-ochre.vercel.app',
+        'https://wa-api-admin-five.vercel.app',
         'https://*.vercel.app',
         'https://*.railway.app',
         process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null,
