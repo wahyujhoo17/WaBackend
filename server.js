@@ -21,7 +21,22 @@ const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 
 const app = express();
-app.use(cors());
+
+// Configure CORS to allow requests from frontend
+const corsOptions = {
+    origin: [
+        'http://localhost:3000',
+        'https://localhost:3000',
+        'https://wa-backend-ochre.vercel.app',
+        'https://*.vercel.app'
+    ],
+    credentials: true,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Create Supabase client with service role key (bypasses RLS)
