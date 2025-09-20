@@ -16,7 +16,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const { createClient } = require('@supabase/supabase-js');
-const { Client } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 
@@ -82,6 +82,36 @@ const whatsappClients = new Map();
 
 // Store QR code per user
 const qrCodes = new Map();
+
+// Store connection keepalive intervals
+const keepaliveIntervals = new Map();
+
+// Function to start keepalive for a client
+function startKeepalive(userId, client) {
+    // Clear existing interval if any
+    if (keepaliveIntervals.has(userId)) {
+        clearInterval(keepaliveIntervals.get(userId));
+    }
+
+    // Start new keepalive interval
+    const interval = setInterval(async () => {
+        try {
+            if (client && client.pupPage && !client.pupPage.isClosed()) {
+                // Send heartbeat by checking client state
+                await client.getState();
+                console.log(`Keepalive ping sent for user ${userId}`);
+            }
+        } catch (error) {
+            console.log(`Keepalive failed for user ${userId}:`, error.message);
+            // Clean up if client is dead
+            whatsappClients.delete(userId);
+            keepaliveIntervals.delete(userId);
+            clearInterval(interval);
+        }
+    }, 30000); // Every 30 seconds
+
+    keepaliveIntervals.set(userId, interval);
+}
 
 // Middleware to verify API key
 const verifyApiKey = async (req, res, next) => {
@@ -466,48 +496,170 @@ app.post('/send-message', verifyApiKey, async (req, res) => {
     const userId = req.user.id;
     let client = whatsappClients.get(userId);
 
-    if (!client) {
-        client = new Client({ session: req.user.session_data });
-        whatsappClients.set(userId, client);
-
-        client.on('qr', qr => {
-            qrCodes.set(userId, qr);
-            qrcode.generate(qr, { small: true });
-        });
-
-        client.on('ready', async () => {
-            // Update whatsapp_connected status
-            try {
-                await supabase
-                    .from('users')
-                    .update({ whatsapp_connected: true })
-                    .eq('id', userId);
-            } catch (error) {
-                console.error('Error updating whatsapp_connected status:', error);
-            }
-        });
-
-        client.on('disconnected', async (reason) => {
-            // Update whatsapp_connected status to false
-            try {
-                await supabase
-                    .from('users')
-                    .update({ whatsapp_connected: false })
-                    .eq('id', userId);
-            } catch (error) {
-                console.error('Error updating whatsapp_connected status:', error);
-            }
-        });
-
-        await client.initialize();
-    }
-
     try {
-        await client.sendMessage(to + '@c.us', message);
-        await supabase.from('logs').insert([{ user_id: userId, action: 'send_message', details: { to, message } }]);
-        res.json({ success: true });
+        // Check if client exists and is ready
+        if (!client) {
+            return res.status(400).json({
+                error: 'WhatsApp not connected',
+                message: 'Please scan QR code first to connect WhatsApp',
+                action: 'generate_qr'
+            });
+        }
+
+        // Check client state
+        const clientState = await client.getState().catch(() => 'UNPAIRED');
+
+        if (clientState !== 'CONNECTED') {
+            console.log(`Client state for user ${userId}: ${clientState}`);
+            return res.status(400).json({
+                error: 'WhatsApp not ready',
+                message: `WhatsApp state: ${clientState}. Please reconnect.`,
+                state: clientState,
+                action: 'reconnect'
+            });
+        }
+
+        // Validate phone number format
+        let phoneNumber = to.replace(/[^0-9]/g, '');
+        if (!phoneNumber.startsWith('62')) {
+            if (phoneNumber.startsWith('0')) {
+                phoneNumber = '62' + phoneNumber.substring(1);
+            } else if (phoneNumber.startsWith('8')) {
+                phoneNumber = '62' + phoneNumber;
+            }
+        }
+
+        // Check if number is registered on WhatsApp
+        const isRegistered = await client.isRegisteredUser(phoneNumber + '@c.us');
+        if (!isRegistered) {
+            return res.status(400).json({
+                error: 'Number not registered',
+                message: `Number ${phoneNumber} is not registered on WhatsApp`
+            });
+        }
+
+        console.log(`Sending message to ${phoneNumber} from user ${userId}`);
+
+        // Send message with timeout
+        const sendPromise = client.sendMessage(phoneNumber + '@c.us', message);
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Send message timeout')), 30000)
+        );
+
+        await Promise.race([sendPromise, timeoutPromise]);
+
+        // Log successful message
+        await supabase.from('logs').insert([{
+            user_id: userId,
+            action: 'send_message',
+            details: { to: phoneNumber, message, status: 'success' }
+        }]);
+
+        res.json({
+            success: true,
+            message: 'Message sent successfully',
+            to: phoneNumber
+        });
+
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error(`Send message error for user ${userId}:`, error);
+
+        // Log failed message
+        await supabase.from('logs').insert([{
+            user_id: userId,
+            action: 'send_message',
+            details: { to, message, status: 'failed', error: error.message }
+        }]).catch(console.error);
+
+        // Handle specific errors
+        if (error.message.includes('Session closed') || error.message.includes('not authenticated')) {
+            // Remove disconnected client
+            whatsappClients.delete(userId);
+            await supabase
+                .from('users')
+                .update({ whatsapp_connected: false })
+                .eq('id', userId)
+                .catch(console.error);
+
+            return res.status(400).json({
+                error: 'Session expired',
+                message: 'WhatsApp session has expired. Please reconnect.',
+                action: 'reconnect'
+            });
+        }
+
+        res.status(500).json({
+            error: 'Send message failed',
+            message: error.message
+        });
+    }
+});
+
+// Endpoint to check WhatsApp connection status
+app.get('/admin/status/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const client = whatsappClients.get(userId);
+
+        if (!client) {
+            return res.json({
+                connected: false,
+                state: 'NO_CLIENT',
+                message: 'No WhatsApp client found. Generate QR code first.'
+            });
+        }
+
+        try {
+            const state = await client.getState();
+            const info = client.info;
+
+            res.json({
+                connected: state === 'CONNECTED',
+                state: state,
+                info: info ? {
+                    name: info.pushname,
+                    number: info.wid ? info.wid.user : null,
+                    platform: info.platform
+                } : null,
+                message: state === 'CONNECTED' ? 'WhatsApp is connected' : `WhatsApp state: ${state}`
+            });
+        } catch (error) {
+            res.json({
+                connected: false,
+                state: 'ERROR',
+                message: error.message
+            });
+        }
+    } catch (err) {
+        console.error('Status check error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Endpoint to disconnect WhatsApp client
+app.post('/admin/disconnect/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const client = whatsappClients.get(userId);
+
+        if (!client) {
+            return res.json({ message: 'No client found to disconnect' });
+        }
+
+        await client.destroy();
+        whatsappClients.delete(userId);
+        qrCodes.delete(userId);
+
+        // Update database
+        await supabase
+            .from('users')
+            .update({ whatsapp_connected: false })
+            .eq('id', userId);
+
+        res.json({ message: 'WhatsApp client disconnected successfully' });
+    } catch (err) {
+        console.error('Disconnect error:', err);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
